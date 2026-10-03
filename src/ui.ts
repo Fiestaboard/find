@@ -3,6 +3,7 @@
 // The package root also exports the template editor, whose optional peers
 // (tiptap, codemirror) this site does not install; importing from the root
 // would make the bundler resolve them.
+export { Shimmer } from "@fiestaboard/ui/components/ai/shimmer";
 export { FiestaIcon } from "@fiestaboard/ui/components/chrome/fiesta-icon";
 export { FiestaLogo } from "@fiestaboard/ui/components/chrome/fiesta-logo";
 export { ActionCard } from "@fiestaboard/ui/components/containment/action-card";

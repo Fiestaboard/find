@@ -18,7 +18,7 @@ export const SCAN_CONCURRENCY: number;
 export type Reach = { ok: boolean; ms: number };
 export type FoundBoard = { address: string; id: string; name: string; version: string };
 export type ListedBoard = FoundBoard & { aliases: string[] };
-export type Stage = { stage: "nearby" } | { stage: "subnet"; prefix: string; checked: number; total: number };
+export type Progress = { checked: number; total: number };
 
 export function subnetCandidates(prefix: string): string[];
 export function gatewayUrl(prefix: string): string;
@@ -39,13 +39,13 @@ export function parseTypedAddress(
   input: unknown,
 ): { ok: true; address: string } | { ok: false; reason: "empty" | "invalid" | "scheme" | "credentials" | "extra" | "public" };
 export function mayProbe(address: string): boolean;
-export function pool<T>(items: T[], concurrency: number, task: (item: T) => Promise<void>, signal?: AbortSignal): Promise<void>;
+export function limiter(max: number): <T>(task: () => Promise<T> | T) => Promise<T>;
 export function scanSubnet(
   prefix: string,
   options: {
     identify: (address: string) => Promise<FoundBoard | null>;
     onFound: (found: FoundBoard) => void;
-    onProgress?: (progress: { prefix: string; checked: number; total: number }) => void;
+    onProgress?: (progress: Progress) => void;
     signal?: AbortSignal;
   },
 ): Promise<void>;
@@ -54,6 +54,6 @@ export function searchNetwork(options: {
   identify: (address: string) => Promise<FoundBoard | null>;
   reach: (url: string) => Promise<Reach>;
   onFound: (found: FoundBoard) => void;
-  onStage?: (stage: Stage) => void;
+  onProgress?: (progress: Progress) => void;
   signal?: AbortSignal;
 }): Promise<{ blocked: boolean }>;

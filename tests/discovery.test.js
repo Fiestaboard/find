@@ -21,7 +21,8 @@ import {
   parseDiscover,
   parseSubnet,
   parseTypedAddress,
-  pool,
+  limiter,
+  SCAN_CONCURRENCY,
   rememberAddress,
   scanSubnet,
   searchNetwork,
@@ -286,55 +287,64 @@ test("public, loopback and malformed ranges are not scanned", () => {
 
 // --- Running the search --------------------------------------------------
 
-test("pool never runs more than the limit at once and runs everything", async () => {
+const tick = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+test("limiter never runs more than its limit at once, and runs everything", async () => {
+  const run = limiter(7);
   let running = 0;
   let peak = 0;
-  const done = [];
-  await pool([...Array(50).keys()], 7, async (n) => {
-    running += 1;
-    peak = Math.max(peak, running);
-    await new Promise((resolve) => setTimeout(resolve, 1));
-    running -= 1;
-    done.push(n);
-  });
+  const results = await Promise.all(
+    [...Array(50).keys()].map((n) =>
+      run(async () => {
+        running += 1;
+        peak = Math.max(peak, running);
+        await tick(1);
+        running -= 1;
+        return n * 2;
+      }),
+    ),
+  );
   assert.equal(peak, 7);
-  assert.equal(done.length, 50);
+  assert.deepEqual(results, [...Array(50).keys()].map((n) => n * 2));
 });
 
-test("pool stops starting work once aborted", async () => {
-  const controller = new AbortController();
-  const done = [];
-  await pool(
-    [...Array(100).keys()],
-    4,
-    async (n) => {
-      done.push(n);
-      if (n === 10) controller.abort();
-    },
-    controller.signal,
-  );
-  assert.ok(done.length < 20, `ran ${done.length}`);
+test("limiter keeps going after a task fails", async () => {
+  const run = limiter(1);
+  await assert.rejects(run(async () => {
+    throw new Error("boom");
+  }));
+  assert.equal(await run(async () => "next"), "next");
 });
 
 /**
  * A pretend network: *boards* maps addresses to what /api/discover says,
  * *routers* lists subnet prefixes whose .1 answers, *blocked* refuses every
- * request instantly the way Safari does.
+ * request instantly the way Safari does. Absent routers take *silentMs* to
+ * time out; every address takes *answerMs* to answer or give up.
  */
-function network({ boards = {}, routers = [], blocked = false } = {}) {
+function network({ boards = {}, routers = [], blocked = false, silentMs = 0, answerMs = 0 } = {}) {
   const asked = [];
-  return {
+  let inFlight = 0;
+  const net = {
     asked,
+    peak: 0,
     identify: async (address) => {
       asked.push(address);
+      inFlight += 1;
+      net.peak = Math.max(net.peak, inFlight);
+      if (answerMs) await tick(answerMs);
+      inFlight -= 1;
       return boards[address] ? { address, ...boards[address] } : null;
     },
     reach: async (url) => {
       if (blocked) return { ok: false, ms: 1 };
       const prefix = new URL(url).hostname.split(".").slice(0, 3).join(".");
-      return routers.includes(prefix) ? { ok: true, ms: 8 } : { ok: false, ms: 2000 };
+      if (routers.includes(prefix)) return { ok: true, ms: 8 };
+      if (silentMs) await tick(silentMs);
+      return { ok: false, ms: 2000 };
     },
   };
+  return net;
 }
 
 test("the search finds a board on the subnet its router is on", async () => {
@@ -346,19 +356,53 @@ test("the search finds a board on the subnet its router is on", async () => {
   assert.ok(!net.asked.some((a) => a.startsWith("http://192.168.1.")), "a subnet with no router was scanned");
 });
 
-test("the search finds a board by name before scanning", async () => {
+test("a subnet is scanned as soon as its router answers, not after the silent ones time out", async () => {
+  const net = network({
+    routers: ["192.168.0"],
+    silentMs: 300,
+    boards: { "http://192.168.0.155:4420": { id: "abcdefgh12" } },
+  });
+  const started = Date.now();
+  let foundAfter = null;
+  await searchNetwork({ known: [], ...net, onFound: () => (foundAfter ??= Date.now() - started) });
+  assert.ok(foundAfter < 150, `board reported after ${foundAfter}ms; the silent routers take 300ms`);
+});
+
+test("scanning several subnets shares one limit on requests in flight", async () => {
+  const net = network({ routers: ["192.168.1", "192.168.0", "10.0.0"], answerMs: 2 });
+  await searchNetwork({ known: [], ...net, onFound: () => {} });
+  assert.equal(net.asked.filter((a) => /^http:\/\/\d/.test(a)).length, 3 * 254);
+  assert.ok(net.peak <= SCAN_CONCURRENCY, `${net.peak} requests in flight`);
+  assert.ok(net.peak > 64, `only ${net.peak} in flight; the scan is not using its budget`);
+});
+
+test("the search finds a board by name", async () => {
   const net = network({ routers: ["192.168.0"], boards: { "http://fiestapi.local:4420": { id: "abcdefgh12" } } });
-  const stages = [];
   const found = [];
-  await searchNetwork({ known: [], ...net, onFound: (b) => found.push(b), onStage: (s) => stages.push(s.stage) });
+  await searchNetwork({ known: [], ...net, onFound: (b) => found.push(b) });
   assert.equal(found[0].address, "http://fiestapi.local:4420");
-  assert.equal(stages[0], "nearby");
 });
 
 test("the search asks a remembered board first", async () => {
   const net = network({ routers: [] });
   await searchNetwork({ known: ["http://10.9.8.7:4420"], ...net, onFound: () => {} });
   assert.equal(net.asked[0], "http://10.9.8.7:4420");
+});
+
+test("when no router answers, the fallback subnets are scanned", async () => {
+  const net = network({ routers: [] });
+  await searchNetwork({ known: [], ...net, onFound: () => {} });
+  assert.ok(net.asked.includes("http://192.168.1.20:4420"));
+  assert.ok(net.asked.includes("http://192.168.0.20:4420"));
+});
+
+test("progress counts every address asked, and finishes complete", async () => {
+  const net = network({ routers: ["192.168.0"] });
+  const progress = [];
+  await searchNetwork({ known: [], ...net, onFound: () => {}, onProgress: (p) => progress.push(p) });
+  const last = progress.at(-1);
+  assert.equal(last.checked, last.total);
+  assert.equal(last.total, 254 + NAMED_CANDIDATES.length);
 });
 
 test("the search reports a browser that blocks local requests instead of scanning", async () => {
@@ -368,9 +412,9 @@ test("the search reports a browser that blocks local requests instead of scannin
   assert.ok(!net.asked.some((a) => /^http:\/\/\d/.test(a)), "subnets were scanned anyway");
 });
 
-test("the search stops when aborted", async () => {
+test("the search stops asking once aborted", async () => {
   const controller = new AbortController();
-  const net = network({ routers: ["192.168.1", "192.168.0"] });
+  const net = network({ routers: ["192.168.1", "192.168.0"], answerMs: 2 });
   let seen = 0;
   const identify = async (address) => {
     seen += 1;
@@ -378,13 +422,15 @@ test("the search stops when aborted", async () => {
     return net.identify(address);
   };
   await searchNetwork({ known: [], identify, reach: net.reach, onFound: () => {}, signal: controller.signal });
-  assert.ok(seen < 150, `asked ${seen} addresses after aborting`);
+  // What was already in flight finishes; nothing new starts.
+  assert.ok(seen <= SCAN_CONCURRENCY + 30, `asked ${seen} addresses after aborting`);
+  assert.ok(seen < 2 * 254);
 });
 
-test("scanning a subnet reports progress up to every address", async () => {
+test("scanning a typed subnet reports progress up to every address", async () => {
   const net = network();
   const progress = [];
   await scanSubnet("192.168.7", { identify: net.identify, onFound: () => {}, onProgress: (p) => progress.push(p) });
-  assert.deepEqual(progress[0], { prefix: "192.168.7", checked: 0, total: 254 });
-  assert.deepEqual(progress.at(-1), { prefix: "192.168.7", checked: 254, total: 254 });
+  assert.deepEqual(progress[0], { checked: 0, total: 254 });
+  assert.deepEqual(progress.at(-1), { checked: 254, total: 254 });
 });

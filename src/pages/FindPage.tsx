@@ -21,6 +21,7 @@ import {
   Input,
   List,
   ListItem,
+  Shimmer,
   Spinner,
   Stack,
   Text,
@@ -31,7 +32,7 @@ import { type FormEvent, type ReactNode, useEffect, useRef, useState } from "rea
 
 import {
   type ListedBoard,
-  type Stage,
+  type Progress,
   NAMED_CANDIDATES,
   addBoard,
   boardUrl,
@@ -74,7 +75,11 @@ function heading(phase: Phase, count: number): { title: string; description?: st
         icon: <Radar />,
       };
     case "searching":
-      return { title: "Looking for your FiestaBoard…", icon: <Spinner size="lg" label={null} /> };
+      // A board shows as found the moment it answers; the search carries on
+      // quietly underneath for any others.
+      return count > 0
+        ? { title: count === 1 ? "Found your FiestaBoard" : `Found ${count} FiestaBoards` }
+        : { title: "Looking for your FiestaBoard…", icon: <Spinner size="lg" label={null} /> };
     case "done":
       return count > 0
         ? { title: count === 1 ? "Found your FiestaBoard" : `Found ${count} FiestaBoards` }
@@ -94,9 +99,18 @@ function heading(phase: Phase, count: number): { title: string; description?: st
   }
 }
 
-function progressText(stage: Stage | null): string {
-  if (!stage || stage.stage === "nearby") return "Checking the usual places…";
-  return `Checking ${stage.prefix}.x · ${stage.checked} of ${stage.total}`;
+/**
+ * What the status line says while searching. It describes the search, not
+ * the addresses being tried, and it only ever moves forward: the total
+ * grows as subnets are added, so the raw fraction can go backwards.
+ */
+const STATUS = ["Checking the usual places…", "Looking around your network…", "Almost done…"];
+
+function statusStep(progress: Progress | null, previous: number): number {
+  if (!progress || progress.total === 0) return previous;
+  const fraction = progress.checked / progress.total;
+  const step = progress.total < 20 ? 0 : fraction < 0.7 ? 1 : 2;
+  return Math.max(previous, step);
 }
 
 /** Hostname and port, without the http:// a person does not need to read. */
@@ -107,7 +121,7 @@ function shortAddress(address: string): string {
 export function FindPage() {
   const [phase, setPhase] = useState<Phase>("idle");
   const [boards, setBoards] = useState<ListedBoard[]>([]);
-  const [stage, setStage] = useState<Stage | null>(null);
+  const [step, setStep] = useState(0);
   const [destination, setDestination] = useState("");
   const [known, setKnown] = useState<string[]>([]);
   const [typed, setTyped] = useState("");
@@ -150,14 +164,14 @@ export function FindPage() {
     }
     if (controller.signal.aborted) return;
 
-    setStage(null);
+    setStep(0);
     show("searching");
     const result = await searchNetwork({
       known: knownAddresses(readRemembered(), readRelayRemembered()),
       identify: (address) => identify(address, controller.signal),
       reach: (url) => reach(url, controller.signal),
       onFound: found,
-      onStage: setStage,
+      onProgress: (progress) => setStep((previous) => statusStep(progress, previous)),
       signal: controller.signal,
     });
     if (search.current !== controller) return;
@@ -180,12 +194,12 @@ export function FindPage() {
     search.current?.abort();
     const controller = new AbortController();
     search.current = controller;
-    setStage({ stage: "subnet", prefix, checked: 0, total: 254 });
+    setStep(1);
     show("searching");
     await scanSubnet(prefix, {
       identify: (address) => identify(address, controller.signal),
       onFound: found,
-      onProgress: (progress) => setStage({ stage: "subnet", ...progress }),
+      onProgress: (progress) => setStep((previous) => statusStep(progress, previous)),
       signal: controller.signal,
     });
     if (search.current === controller) show("done");
@@ -246,17 +260,6 @@ export function FindPage() {
             </Stack>
           )}
 
-          {searching && (
-            <Flex align="center" justify="between" gap="3">
-              <Text size="sm" tone="muted" className="tabular-nums">
-                {phase === "asking" ? "Waiting for your answer…" : progressText(stage)}
-              </Text>
-              <Button variant="outline" size="sm" onClick={stop}>
-                Stop
-              </Button>
-            </Flex>
-          )}
-
           {boards.length > 0 && (
             <List gap="2" aria-label="FiestaBoards found">
               {boards.map((board) => (
@@ -284,6 +287,25 @@ export function FindPage() {
                 </ListItem>
               ))}
             </List>
+          )}
+
+          {/* Below the boards, so a board that answers early sits at the top
+              while the search finishes underneath it. */}
+          {searching && (
+            <Flex align="center" justify="between" gap="3">
+              <Text size="sm">
+                <Shimmer>
+                  {phase === "asking"
+                    ? "Waiting for your answer…"
+                    : boards.length > 0
+                      ? "Checking for other boards…"
+                      : STATUS[step]}
+                </Shimmer>
+              </Text>
+              <Button variant="outline" size="sm" onClick={stop}>
+                {boards.length > 0 ? "Done" : "Stop"}
+              </Button>
+            </Flex>
           )}
 
           {/* Mounted for the page's whole life so changes are announced. */}

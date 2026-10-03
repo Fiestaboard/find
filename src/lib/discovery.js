@@ -292,46 +292,60 @@ export function mayProbe(address) {
 }
 
 /**
- * Run *task* over *items*, at most *concurrency* at a time, stopping early
- * when *signal* aborts. Resolves when every started task has settled.
+ * At most *max* tasks in flight at once, shared by everyone holding the
+ * returned function. `run(task)` resolves with the task's result once it
+ * has had its turn.
  */
-export async function pool(items, concurrency, task, signal) {
-  let next = 0;
-  async function worker() {
-    while (next < items.length && !signal?.aborted) {
-      const item = items[next];
-      next += 1;
-      await task(item);
-    }
-  }
-  await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, worker));
+export function limiter(max) {
+  let active = 0;
+  const waiting = [];
+  const next = () => {
+    active -= 1;
+    waiting.shift()?.();
+  };
+  return (task) =>
+    new Promise((resolve, reject) => {
+      const start = () => {
+        active += 1;
+        Promise.resolve().then(task).then(resolve, reject).finally(next);
+      };
+      if (active < max) start();
+      else waiting.push(start);
+    });
 }
 
-/** How many addresses are asked at once while scanning a subnet. */
-export const SCAN_CONCURRENCY = 64;
+/**
+ * How many addresses are asked at once, across every subnet being scanned.
+ * Empty addresses never answer and each holds its slot until the timeout,
+ * so this sets how many timeouts a scan waits through: 254 addresses at 192
+ * is two. Chrome allows 256 connections per profile, and the page needs a
+ * few of those for itself.
+ */
+export const SCAN_CONCURRENCY = 192;
 
 /**
- * Ask every address on *prefix*.x, reporting progress as it goes.
+ * Ask every address on *prefix*.x.
  *
  *   identify(address) -> Promise<found | null>
  *   onFound(found)     a board answered
- *   onProgress({ prefix, checked, total })
+ *   onProgress({ checked, total })
  */
 export async function scanSubnet(prefix, { identify, onFound, onProgress, signal }) {
+  const run = limiter(SCAN_CONCURRENCY);
   const hosts = subnetCandidates(prefix);
   let checked = 0;
-  onProgress?.({ prefix, checked, total: hosts.length });
-  await pool(
-    hosts,
-    SCAN_CONCURRENCY,
-    async (address) => {
-      const found = await identify(address);
-      checked += 1;
-      if (signal?.aborted) return;
-      if (found) onFound(found);
-      onProgress?.({ prefix, checked, total: hosts.length });
-    },
-    signal,
+  onProgress?.({ checked, total: hosts.length });
+  await Promise.all(
+    hosts.map((address) =>
+      run(async () => {
+        if (signal?.aborted) return;
+        const found = await identify(address);
+        checked += 1;
+        if (signal?.aborted) return;
+        if (found) onFound(found);
+        onProgress?.({ checked, total: hosts.length });
+      }),
+    ),
   );
 }
 
@@ -339,47 +353,69 @@ export async function scanSubnet(prefix, { identify, onFound, onProgress, signal
  * The whole search. Resolves to { blocked } once every step has run or
  * *signal* aborted; boards are reported through onFound as they answer.
  *
- *   known          addresses this browser remembers (knownAddresses)
- *   identify(address) -> Promise<found | null>
- *   reach(url)     -> Promise<{ ok, ms }>, for routers
- *   onStage({ stage: "nearby" } | { stage: "subnet", prefix, checked, total })
+ * Nothing waits that does not have to. Known addresses and well-known names
+ * are asked straight away. A subnet is scanned the moment its router
+ * answers, which on a real network is within milliseconds; only routers
+ * that never answer cost the full router timeout, and only when no router
+ * answers at all does the search wait for them.
+ *
+ *   known              addresses this browser remembers (knownAddresses)
+ *   identify(address)  -> Promise<found | null>
+ *   reach(url)         -> Promise<{ ok, ms }>, for routers
+ *   onProgress({ checked, total })  total grows as subnets are added
  */
-export async function searchNetwork({ known, identify, reach, onFound, onStage, signal }) {
-  onStage?.({ stage: "nearby" });
+export async function searchNetwork({ known, identify, reach, onFound, onProgress, signal }) {
+  const run = limiter(SCAN_CONCURRENCY);
+  let checked = 0;
+  let total = 0;
   let foundAny = false;
-  const report = (found) => {
-    foundAny = true;
-    onFound(found);
+
+  const ask = (address) => {
+    total += 1;
+    return run(async () => {
+      if (signal?.aborted) return;
+      const found = await identify(address);
+      checked += 1;
+      if (signal?.aborted) return;
+      if (found) {
+        foundAny = true;
+        onFound(found);
+      }
+      onProgress?.({ checked, total });
+    });
   };
 
-  const gateways = {};
-  await Promise.all([
-    pool(
-      firstPassCandidates(known).filter(mayProbe),
-      16,
-      async (address) => {
-        const found = await identify(address);
-        if (found && !signal?.aborted) report(found);
-      },
-      signal,
-    ),
-    Promise.all(
-      COMMON_SUBNETS.map(async (prefix) => {
-        gateways[prefix] = await reach(gatewayUrl(prefix));
-      }),
-    ),
-  ]);
-  if (signal?.aborted) return { blocked: false };
-  if (!foundAny && looksBlocked(Object.values(gateways))) return { blocked: true };
+  const scans = [];
+  const scanned = new Set();
+  const scan = (prefix) => {
+    if (signal?.aborted || scanned.has(prefix) || scanned.size >= MAX_SUBNETS) return;
+    scanned.add(prefix);
+    scans.push(Promise.all(subnetCandidates(prefix).map(ask)));
+    onProgress?.({ checked, total });
+  };
 
-  for (const prefix of subnetsToScan(gateways)) {
-    if (signal?.aborted) break;
-    await scanSubnet(prefix, {
-      identify,
-      onFound: report,
-      onProgress: (progress) => onStage?.({ stage: "subnet", ...progress }),
-      signal,
-    });
+  const firstPass = Promise.all(firstPassCandidates(known).filter(mayProbe).map(ask));
+  onProgress?.({ checked, total });
+
+  const gateways = {};
+  await Promise.all(
+    COMMON_SUBNETS.map(async (prefix) => {
+      gateways[prefix] = await reach(gatewayUrl(prefix));
+      // An answer is proof enough to start now. A quick failure might be a
+      // router refusing or a browser blocking everything; that is only
+      // decidable once every router has been asked.
+      if (gateways[prefix].ok) scan(prefix);
+    }),
+  );
+
+  if (looksBlocked(Object.values(gateways))) {
+    await firstPass;
+    if (!foundAny && !signal?.aborted) return { blocked: true };
+  } else {
+    for (const prefix of subnetsToScan(gateways)) scan(prefix);
   }
+
+  await firstPass;
+  await Promise.all(scans);
   return { blocked: false };
 }

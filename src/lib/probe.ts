@@ -10,7 +10,12 @@ import { DISCOVER_PATH, IDENTIFY_PATH, isBoardIdentity, parseDiscover } from "./
 
 export type Found = { address: string; id: string; name: string; version: string };
 
-const IDENTIFY_TIMEOUT_MS = 2500;
+// A board answers in tens of milliseconds, even a Raspberry Pi. An address
+// nobody holds never answers, and in a scan most addresses are like that,
+// so this timeout is most of how long a scan takes. Names get longer: the
+// .local lookup itself can take a second.
+const ADDRESS_TIMEOUT_MS = 1500;
+const NAME_TIMEOUT_MS = 2500;
 const REACH_TIMEOUT_MS = 2000;
 
 // Chrome recognises private IP literals, .local names and localhost as local
@@ -54,20 +59,22 @@ async function readJson(response: Response | null): Promise<unknown> {
 
 /** The board at *address*, or null when nothing there is a FiestaBoard. */
 export async function identify(address: string, signal?: AbortSignal): Promise<Found | null> {
+  const hostname = new URL(address).hostname;
+  const timeout = /^\d+\.\d+\.\d+\.\d+$/.test(hostname) ? ADDRESS_TIMEOUT_MS : NAME_TIMEOUT_MS;
   const init: LocalRequestInit = {
     mode: "cors",
     credentials: "omit",
     cache: "no-store",
     redirect: "error",
     referrerPolicy: "no-referrer",
-    targetAddressSpace: addressSpace(new URL(address).hostname),
+    targetAddressSpace: addressSpace(hostname),
   };
-  const identity = await timedFetch(`${address}${IDENTIFY_PATH}`, init, IDENTIFY_TIMEOUT_MS, signal);
+  const identity = await timedFetch(`${address}${IDENTIFY_PATH}`, init, timeout, signal);
   if (!isBoardIdentity(await readJson(identity.response))) return null;
 
   // 9.9 and later say more about themselves; earlier boards (or ones that
   // require sign-in for unknown routes) just do not, and are listed anyway.
-  const detail = await timedFetch(`${address}${DISCOVER_PATH}`, init, IDENTIFY_TIMEOUT_MS, signal);
+  const detail = await timedFetch(`${address}${DISCOVER_PATH}`, init, NAME_TIMEOUT_MS, signal);
   return { address, id: "", name: "", version: "", ...parseDiscover(await readJson(detail.response)) };
 }
 

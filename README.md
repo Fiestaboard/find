@@ -21,10 +21,21 @@ FiestaBoard?" and lists the ones that say yes:
    (same origin, so the same `localStorage`).
 2. **Names a board answers to with no setup:** `fiestapi.local` (the Raspberry Pi image),
    `fiestaboard.local` (Docker with host networking), and `homeassistant.local`.
-3. **Every address on the home subnets that exist.** The page first asks the usual router
-   address (`.1`) on about a dozen common subnets (`192.168.1.x`, `192.168.0.x`, `10.0.0.x`,
-   …). A subnet whose router answers, or refuses quickly, is in use; one that stays silent is
-   not. At most three subnets are then scanned, 254 addresses each, on port 4420.
+3. **Every address on the home subnets that exist.** The page asks the usual router address
+   (`.1`) on about a dozen common subnets (`192.168.1.x`, `192.168.0.x`, `10.0.0.x`, …). A
+   subnet is scanned the moment its router answers, without waiting for the others to time
+   out. A router that refuses quickly also counts as present, once every router has been
+   asked. At most three subnets are scanned, 254 addresses each, on port 4420.
+
+All three steps start at once and share one pool of up to 192 requests in flight. An empty
+address never answers, so the scan's length is mostly how many timeouts it waits through:
+1.5 s each for IP addresses (a board answers in milliseconds) and 2.5 s for names, whose
+`.local` lookup takes longer. On a typical network the first board appears within a fraction
+of a second, and the whole search takes about three seconds.
+
+A board is shown as soon as it answers, and the search carries on underneath it. The status
+line describes the search ("Looking around your network…") rather than the addresses being
+tried.
 
 A board is recognised by `GET /api/`, which every FiestaBoard release answers without a
 session and with `Access-Control-Allow-Origin: *`. Boards from 9.9 on also answer
