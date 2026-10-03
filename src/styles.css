@@ -1,0 +1,6 @@
+@import "tailwindcss";
+@import "@fiestaboard/ui/fonts.css";
+@import "@fiestaboard/ui/theme.css";
+/* Mandatory: Tailwind v4 does not scan node_modules, and FiestaUI ships class
+   strings rather than compiled CSS. */
+@source "../node_modules/@fiestaboard/ui/dist";
