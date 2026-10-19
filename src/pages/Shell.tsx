@@ -9,12 +9,16 @@ import type { ReactNode, Ref } from "react";
 
 const README_URL = "https://github.com/Fiestaboard/find#readme";
 
-export function Shell({ children, links }: { children: ReactNode; links?: ReactNode }) {
+export function Shell({ children, links, showBrandIcon = true }: {
+  children: ReactNode;
+  links?: ReactNode;
+  showBrandIcon?: boolean;
+}) {
   return (
     <main className="flex min-h-dvh flex-col items-center justify-center px-4 py-8 sm:py-12">
       <Stack gap="6" align="center" className="w-full max-w-md">
         <Flex align="center" gap="3">
-          <FiestaIcon size={36} className="shrink-0" />
+          {showBrandIcon && <FiestaIcon size={36} className="shrink-0" />}
           <FiestaLogo className="text-2xl" />
         </Flex>
         <Card className="w-full shadow-modal">{children}</Card>
