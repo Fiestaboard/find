@@ -13,7 +13,7 @@
     "test:dist": "node --test tests/dist.test.js"
   },
   "dependencies": {
-    "@fiestaboard/ui": "7.1.0",
+    "@fiestaboard/ui": "8.13.1",
     "lucide-react": "1.49.0",
     "react": "19.3.0",
     "react-dom": "19.3.0"
