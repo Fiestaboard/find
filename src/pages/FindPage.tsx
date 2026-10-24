@@ -231,7 +231,7 @@ export function FindPage() {
   const searching = phase === "searching" || phase === "asking";
 
   return (
-    <Shell>
+    <Shell showBrandIcon={!searching}>
       <PageHeading ref={title} icon={icon} description={description}>
         {titleText}
       </PageHeading>

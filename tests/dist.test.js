@@ -48,11 +48,15 @@ for (const page of PAGES) {
     assert.doesNotMatch(html, /\sstyle="/);
   });
 
-  test(`${page} loads scripts, styles and icons only from this site, by relative path`, () => {
+  test(`${page} loads scripts and styles by relative path and permits embedded raster images`, () => {
     const urls = [
       ...attributes(html, "script", "src"),
       ...attributes(html, "link", "href"),
-      ...attributes(html, "img", "src"),
+      // The CSP permits data: images. Keep this exception limited to the
+      // shared loader’s PNG/WebP artwork, never scripts, styles, or SVG.
+      ...attributes(html, "img", "src").filter(
+        (url) => !/^data:image\/(?:png|webp);base64,[A-Za-z0-9+/]+={0,2}$/.test(url),
+      ),
     ];
     assert.ok(urls.length > 0);
     for (const url of urls) {
